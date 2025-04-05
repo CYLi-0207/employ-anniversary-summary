@@ -13,7 +13,7 @@ def init_session():
 
 # 页面配置
 st.set_page_config(
-    page_title="员工入职周年分析系统",
+    page_title="员工入职周年分析系统（司龄版）",
     layout="centered",
     initial_sidebar_state="collapsed"
 )
@@ -34,7 +34,7 @@ uploaded_file = st.file_uploader(
     "📤 上传最新花名册Excel文件",
     type=["xlsx"],
     key='file_uploader',
-    help="请确保文件包含正确的员工信息字段"
+    help="文件必须包含【司龄开始日期】和【入职日期】字段"
 )
 
 # 参数选择
@@ -57,20 +57,32 @@ with col2:
 def process_data(df, year, month):
     try:
         # 字段验证
-        required_columns = ['入职日期', '三级组织', '四级组织', 
-                          '员工二级类别', '员工一级类别', '姓名', '花名']
+        required_columns = [
+            '司龄开始日期', '入职日期', '三级组织', '四级组织',
+            '员工二级类别', '员工一级类别', '姓名', '花名'
+        ]
         missing = [col for col in required_columns if col not in df.columns]
         if missing:
             raise ValueError(f"缺失必要字段: {', '.join(missing)}")
 
-        # 数据处理
-        df['入职日期'] = pd.to_datetime(df['入职日期'], errors='coerce')
-        if df['入职日期'].isnull().any():
-            raise ValueError("存在无效的日期格式")
-            
-        df['入职月份'] = df['入职日期'].dt.month
+        # 处理实际入职日期
+        df['实际入职日期'] = df.apply(
+            lambda x: x['司龄开始日期'] if pd.notna(x['司龄开始日期']) else x['入职日期'],
+            axis=1
+        )
         
-        # 筛选逻辑
+        # 日期格式转换
+        df['实际入职日期'] = pd.to_datetime(df['实际入职日期'], errors='coerce')
+        if df['实际入职日期'].isnull().any():
+            invalid_records = df[df['实际入职日期'].isnull()][['姓名', '司龄开始日期', '入职日期']]
+            st.error("发现无效日期记录：")
+            st.dataframe(invalid_records)
+            raise ValueError("存在无效的日期格式（司龄开始日期或入职日期）")
+        
+        # 计算月份
+        df['入职月份'] = df['实际入职日期'].dt.month
+
+        # 筛选条件
         condition = (
             (df['入职月份'] == month) &
             (~((df['三级组织'] == '财务中心') & (df['四级组织'] == '证照支持部'))) &
@@ -81,15 +93,15 @@ def process_data(df, year, month):
         # 记录排除人员
         excluded = df[~condition][['姓名', '三级组织', '四级组织']]
         st.session_state.excluded = excluded.to_dict('records')
-        
-        # 计算周年
-        filtered_df['周年数'] = year - filtered_df['入职日期'].dt.year
+
+        # 计算周年数
+        filtered_df['周年数'] = year - filtered_df['实际入职日期'].dt.year
         filtered_df = filtered_df[filtered_df['周年数'] >= 1]
-        
+
         # 生成备注
         filtered_df['备注'] = filtered_df['员工一级类别'].apply(
             lambda x: '注意外包人员' if x == '外包' else '')
-            
+
         # 格式化显示
         filtered_df['人员信息'] = filtered_df.apply(
             lambda r: f"{r['三级组织']}-{r['姓名']}（{r['花名']}）" 
