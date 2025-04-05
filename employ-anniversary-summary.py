@@ -1,187 +1,163 @@
 import streamlit as st
 import pandas as pd
-from io import BytesIO
+from datetime import datetime
+import io
 
 # 初始化session状态
-def init_session():
-    reset_keys = ['processed', 'result1', 'result2', 'messages', 'excluded']
-    for key in reset_keys:
-        if key in st.session_state:
-            del st.session_state[key]
-    st.session_state.setdefault('messages', [])
-    st.session_state.setdefault('excluded', [])
+if 'processed' not in st.session_state:
+    st.session_state.processed = False
+if 'output1' not in st.session_state:
+    st.session_state.output1 = None
+if 'output2' not in st.session_state:
+    st.session_state.output2 = None
+if 'alerts' not in st.session_state:
+    st.session_state.alerts = []
+if 'excluded' not in st.session_state:
+    st.session_state.excluded = []
+if 'special_cases' not in st.session_state:
+    st.session_state.special_cases = []
 
-# 页面配置
-st.set_page_config(
-    page_title="员工入职周年分析系统（司龄版）",
-    layout="centered",
-    initial_sidebar_state="collapsed"
-)
+# 页面说明容器
+with st.container():
+    st.title("入职周年分析系统")
+    st.warning("""
+    ​**重要说明**  
+    本网页根据2025.4.4版本的花名册数据生成，如果输入数据有变更，产出可能出错，需要与管理员联系
+    """)
 
-# 页面说明
-st.markdown("""
-**版本说明**  
-本系统根据2025.4.4版本的花名册数据规范开发，数据格式变更可能导致分析错误，请联系系统管理员。
-""")
+# 文件上传容器
+with st.container():
+    st.header("数据准备")
+    uploaded_file = st.file_uploader("上传花名册（Excel格式）", type=["xlsx"], accept_multiple_files=False)
 
-# 重新开始按钮
-if st.button("🔄 重新开始"):
-    init_session()
-    st.experimental_rerun()
+# 参数选择容器
+with st.container():
+    col1, col2 = st.columns(2)
+    with col1:
+        year_range = range(2021, datetime.now().year+1)
+        selected_year = st.selectbox("当前年份", options=year_range, index=len(year_range)-1)
+    with col2:
+        selected_month = st.selectbox("目标月份", options=range(1,13), format_func=lambda x: f"{x}月")
 
-# 文件上传
-uploaded_file = st.file_uploader(
-    "📤 上传最新花名册Excel文件",
-    type=["xlsx"],
-    key='file_uploader',
-    help="文件必须包含【司龄开始日期】和【入职日期】字段"
-)
-
-# 参数选择
-col1, col2 = st.columns(2)
-with col1:
-    selected_year = st.selectbox(
-        "🗓️ 当前年份",
-        options=range(2021, pd.Timestamp.now().year + 1),
-        format_func=lambda x: f"{x}年"
-    )
-with col2:
-    selected_month = st.selectbox(
-        "📆 当前月份",
-        options=range(1, 13),
-        format_func=lambda x: f"{x}月",
-        index=2  # 默认选择3月
-    )
-
-# 数据处理函数
-def process_data(df, year, month):
+# 处理函数
+def process_data():
     try:
-        # 字段验证
-        required_columns = [
-            '司龄开始日期', '入职日期', '三级组织', '四级组织',
-            '员工二级类别', '员工一级类别', '姓名', '花名'
-        ]
-        missing = [col for col in required_columns if col not in df.columns]
-        if missing:
-            raise ValueError(f"缺失必要字段: {', '.join(missing)}")
-
-        # 处理实际入职日期
-        df['实际入职日期'] = df.apply(
-            lambda x: x['司龄开始日期'] if pd.notna(x['司龄开始日期']) else x['入职日期'],
-            axis=1
-        )
+        # 重置状态
+        st.session_state.alerts = []
+        st.session_state.excluded = []
+        st.session_state.special_cases = []
         
-        # 日期格式转换
-        df['实际入职日期'] = pd.to_datetime(df['实际入职日期'], errors='coerce')
-        if df['实际入职日期'].isnull().any():
-            invalid_records = df[df['实际入职日期'].isnull()][['姓名', '司龄开始日期', '入职日期']]
-            st.error("发现无效日期记录：")
-            st.dataframe(invalid_records)
-            raise ValueError("存在无效的日期格式（司龄开始日期或入职日期）")
+        # 读取数据
+        df = pd.read_excel(uploaded_file)
+        
+        # 字段校验
+        required_columns = {'入职日期', '三级组织', '四级组织', '员工二级类别', '员工一级类别', '姓名', '花名'}
+        if not required_columns.issubset(df.columns):
+            missing = required_columns - set(df.columns)
+            raise ValueError(f"缺少必要字段：{', '.join(missing)}")
+        
+        # 处理日期字段
+        df['司龄开始日期'] = pd.to_datetime(df.get('司龄开始日期', pd.NaT))
+        df['入职日期'] = pd.to_datetime(df['入职日期'])
+        df['实际入职日期'] = df['司龄开始日期'].fillna(df['入职日期'])
         
         # 计算月份
         df['入职月份'] = df['实际入职日期'].dt.month
-
-        # 筛选条件
-        condition = (
-            (df['入职月份'] == month) &
+        
+        # 筛选逻辑
+        filtered = df[
+            (df['入职月份'] == selected_month) &
             (~((df['三级组织'] == '财务中心') & (df['四级组织'] == '证照支持部'))) &
             (df['员工二级类别'] == '正式员工')
-        )
-        filtered_df = df[condition].copy()
+        ].copy()
         
-        # 记录排除人员
-        excluded = df[~condition][['姓名', '三级组织', '四级组织']]
-        st.session_state.excluded = excluded.to_dict('records')
-
+        # 记录被排除人员
+        excluded = df[~df.index.isin(filtered.index)]
+        st.session_state.excluded = excluded[['姓名', '员工二级类别', '三级组织']].to_dict('records')
+        
         # 计算周年数
-        filtered_df['周年数'] = year - filtered_df['实际入职日期'].dt.year
-        filtered_df = filtered_df[filtered_df['周年数'] >= 1]
-
-        # 生成备注
-        filtered_df['备注'] = filtered_df['员工一级类别'].apply(
+        filtered['周年数'] = selected_year - filtered['实际入职日期'].dt.year
+        filtered = filtered[filtered['周年数'] >= 1]
+        
+        # 添加备注
+        filtered['备注'] = filtered['员工一级类别'].apply(
             lambda x: '注意外包人员' if x == '外包' else '')
-
-        # 格式化显示
-        filtered_df['人员信息'] = filtered_df.apply(
-            lambda r: f"{r['三级组织']}-{r['姓名']}（{r['花名']}）" 
-            if pd.notna(r['花名']) else f"{r['三级组织']}-{r['姓名']}", axis=1)
-
-        # 生成统计
-        summary = (
-            filtered_df.groupby('周年数', as_index=False)
-            .agg(人员信息=('人员信息', '、'.join))
-            .sort_values('周年数', ascending=False)
-        )
-        summary['周年标签'] = summary['周年数'].astype(str) + '周年'
         
-        return filtered_df, summary[['周年数', '周年标签', '人员信息']]
-
-    except Exception as e:
-        st.error(f"数据处理错误: {str(e)}")
-        raise
-
-# 执行分析
-if st.button("🚀 开始分析", type="primary") and uploaded_file:
-    init_session()
-    try:
-        df = pd.read_excel(uploaded_file)
-        filtered_df, summary_df = process_data(df, selected_year, selected_month)
+        # 识别活水人员
+        if '异动类型' in filtered.columns:
+            st.session_state.special_cases = filtered[
+                filtered['异动类型'] == '活水']['姓名'].tolist()
         
-        # 保存结果到内存
-        output1 = BytesIO()
-        with pd.ExcelWriter(output1, engine='openpyxl') as writer:
-            filtered_df.to_excel(writer, index=False)
-        output1.seek(0)
+        # 生成明细表
+        output1 = io.BytesIO()
+        filtered.to_excel(output1, index=False)
+        st.session_state.output1 = output1.getvalue()
         
-        output2 = BytesIO()
-        summary_df.to_excel(output2, index=False)
-        output2.seek(0)
+        # 生成统计表
+        filtered['人员信息'] = filtered.apply(
+            lambda row: f"{row['三级组织']}-{row['姓名']}" + 
+            (f"（{row['花名']}）" if pd.notna(row['花名']) else ""), axis=1)
         
-        # 更新状态
-        st.session_state.update({
-            'processed': True,
-            'result1': output1,
-            'result2': output2,
-            'messages': [
-                f"✅ 原始数据记录数: {len(df)}",
-                f"✅ 符合条件人员数: {len(filtered_df)}",
-                f"✅ 排除人员数: {len(st.session_state.excluded)}",
-                "⚠️ 存在需注意的外包人员" if any(filtered_df['备注'] != '') else ""
-            ]
-        })
+        result = filtered.groupby('周年数').agg(人员列表=('人员信息', lambda x: '、'.join(x)))
+        result = result.sort_values('周年数', ascending=False).reset_index()
+        result['周年标签'] = result['周年数'].astype(str) + '周年'
+        
+        output2 = io.BytesIO()
+        result.to_excel(output2, index=False)
+        st.session_state.output2 = output2.getvalue()
+        
+        # 处理完成
+        st.session_state.processed = True
+        st.session_state.alerts.append("分析完成")
         
     except Exception as e:
-        st.error(f"分析失败: {str(e)}")
+        st.error(f"处理失败：{str(e)}")
         st.session_state.processed = False
 
-# 结果显示
-if st.session_state.get('processed'):
-    st.success("## 分析完成")
-    
-    # 统计信息
-    st.markdown("### 处理摘要")
-    for msg in st.session_state.messages:
-        st.write(msg)
-    
-    # 排除人员
-    if st.session_state.excluded:
-        st.markdown("### 特殊排除人员")
-        st.dataframe(pd.DataFrame(st.session_state.excluded))
-    
-    # 下载按钮
-    col1, col2 = st.columns(2)
+# 按钮容器
+with st.container():
+    col1, col2 = st.columns([1,2])
     with col1:
-        st.download_button(
-            label="📥 下载人员清单",
-            data=st.session_state.result1,
-            file_name="周年人员清单.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
+        if st.button("开始分析", disabled=not uploaded_file):
+            process_data()
     with col2:
-        st.download_button(
-            label="📊 下载统计报表",
-            data=st.session_state.result2,
-            file_name="周年统计报表.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
+        if st.button("重新开始"):
+            st.session_state.processed = False
+            st.session_state.output1 = None
+            st.session_state.output2 = None
+            st.session_state.alerts = []
+            st.experimental_rerun()
+
+# 结果展示容器
+if st.session_state.processed:
+    with st.container():
+        st.success("#### 处理结果")
+        
+        # 下载区域
+        col1, col2 = st.columns(2)
+        with col1:
+            st.download_button(
+                label="下载人员明细表",
+                data=st.session_state.output1,
+                file_name="符合条件人员列表.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+        with col2:
+            st.download_button(
+                label="下载周年统计表",
+                data=st.session_state.output2,
+                file_name="入职周年统计表.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+        
+        # 提醒信息
+        if st.session_state.excluded:
+            st.warning(f"已排除 {len(st.session_state.excluded)} 名不符合条件人员")
+        if st.session_state.special_cases:
+            st.info(f"需人工核查活水人员：{', '.join(st.session_state.special_cases)}")
+        if any('注意外包人员' in row for row in st.session_state.output1):
+            st.error("发现外包人员，请核查备注列")
+
+# 持久化显示提醒
+for msg in st.session_state.alerts:
+    st.success(msg)
